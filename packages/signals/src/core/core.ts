@@ -4,6 +4,7 @@ import {
   notifyStatus,
   parkLoadingWindow,
   releaseFlightTeardown,
+  releaseIfSettledUnobserved,
   settleErroredDependents,
   settlePendingSource,
   stageError
@@ -68,7 +69,14 @@ import {
   type Refreshable
 } from "./constants.js";
 import { NotReadyError } from "./error.js";
-import { clearDeps, dormantNodes, link, trimStaleDeps } from "./graph.js";
+import {
+  clearDeps,
+  deferReleases,
+  deferredReleases,
+  dormantNodes,
+  link,
+  trimStaleDeps
+} from "./graph.js";
 import {
   deleteFromHeap,
   enqueueSub,
@@ -159,8 +167,29 @@ GlobalQueue._update = el => {
   // (REACTIVE_LANE_DIRTY — a lane shows ahead of any park): it runs now, as
   // the lane's work, for the reveal this seam (#3463).
   else if (el._flags & REACTIVE_ZOMBIE && !(el._flags & REACTIVE_LANE_DIRTY)) deferZombie(el);
-  else recompute(el);
+  // A lane frame's member (parked by a lane pass, #3698) follows mainline
+  // writes only: a lane's dirty on it is cancelled — the lane's apply retires
+  // it, and the pass that replaced it already decided what that screen shows
+  // (#4137: a `<Show>` branch withdrawn by its own lane re-ran on a falsy
+  // condition).
+  // (Lanes exist only with the lane engine installed: folded away without.)
+  else if (laneStageHook && el._flags & REACTIVE_ZOMBIE && laneFrameMember(el)) {
+    deleteFromHeap(el, dirtyQueue);
+    el._flags &= ~(REACTIVE_DIRTY | REACTIVE_CHECK | REACTIVE_LANE_DIRTY);
+  } else recompute(el);
 };
+/** The zombie's frame was parked by lane work: the nearest non-zombie owner
+ * (the one whose pass parked it) carries a lane's derived value — or, an
+ * effect (no lane value: `laneStage`), is listed in a lane (an `insert()`
+ * hole's render effect). */
+function laneFrameMember(el: Computed<any>): boolean {
+  let o: any = el._parent;
+  while (o._flags & REACTIVE_ZOMBIE) o = o._parent;
+  return (
+    (o._config & (CONFIG_OVERRIDE | CONFIG_GUESS)) === CONFIG_OVERRIDE ||
+    (o._type && o._x?._transaction?._lane)
+  );
+}
 GlobalQueue._dispose = disposeChildren;
 
 export const PRIMITIVE_IN_FORBIDDEN_SCOPE_MESSAGE =
@@ -269,6 +298,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
   // §12d: any recompute can clean a marked subscriber — invalidate skips.
   bumpNotifyEpoch();
   const isEffect = (el as any)._type;
+  let released: Computed<any>[] | undefined;
   // Lanes (plan sec. 28): the seat of a pass is its node's. A node carrying a lane's
   // derived value runs as the lane's whoever dirtied it — a sync write, a
   // boundary reset, a frame rerun — so its children and its result are the
@@ -365,8 +395,20 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
     // frame parked before it stays parked. Otherwise they ARE the frame:
     // park them until this pass commits. Tracked effects run after the seam
     // and own nothing to park.
-    if (isEffect === EFFECT_TRACKED || el._config & CONFIG_STAGED) disposeChildren(el);
-    else if (el._firstChild !== null || el._disposal !== null) parkChildren(el);
+    if (isEffect === EFFECT_TRACKED || el._config & CONFIG_STAGED) {
+      // A lazy node only those children read is released when this pass
+      // ends, if the pass doesn't read it again (#4142).
+      const prev = deferredReleases;
+      deferReleases((released = []));
+      disposeChildren(el);
+      deferReleases(prev);
+    } else if (el._firstChild !== null || el._disposal !== null) parkChildren(el);
+    // An error a pass staged (D-41) is replaced by this pass's answer: a
+    // value, a flight, or an error of its own (#4109, #4145).
+    if (el._config & CONFIG_STAGED_ERROR) {
+      el._pendingValue = NOT_PENDING;
+      el._config ^= CONFIG_STAGED_ERROR;
+    }
     if (__DEV__) clearSignals(el);
   }
 
@@ -520,6 +562,7 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
           REACTIVE_PROBE_UNANSWERED)) |
       (create ? el._flags & REACTIVE_SNAPSHOT_STALE : 0);
     context = oldcontext;
+    if (released) for (const node of released) releaseIfSettledUnobserved(node);
     // A19 exc. 2: a pass that went pending on a `refresh()` re-asks the
     // question already answered — quiet for the verdict; any other pending
     // pass is a new question. Settled, there is nothing to classify.
@@ -586,20 +629,9 @@ export function recompute(el: Computed<any>, create: boolean = false): void {
         : el._config & CONFIG_OVERRIDE && el._x!._lane !== NOT_PENDING
           ? el._x!._lane
           : el._value;
-    let valueChanged = false;
-    try {
-      valueChanged =
-        (!isEffect && wasUninitialized) ||
-        !!el._x?._shownError ||
-        !el._equals ||
-        !el._equals(compareValue, value);
-    } catch (e) {
-      // A throwing user comparator is an error of this node's computation.
-      // Route it through the same status path as a compute-phase throw so
-      // error boundaries contain it; otherwise it unwinds the scheduler
-      // flush, bypassing every boundary and wedging the queue (#2837).
-      notifyStatus(el, STATUS_ERROR, e);
-    }
+    // A throwing comparator is contained inside `isSame` (A3, #2837; #4111).
+    const valueChanged =
+      (!isEffect && wasUninitialized) || !!el._x?._shownError || !isSame(el, compareValue, value);
 
     // A committed derived change becomes a cause for this node's subscribers,
     // chaining their attribution through this node to the root write.
@@ -1605,7 +1637,9 @@ export function readerSeesCommitted(
   el: Signal<any> | Computed<any>,
   c: Computed<any> | null
 ): boolean {
-  return !!(!c || el._pendingValue === NOT_PENDING || c._config & CONFIG_CHILDREN_FORBIDDEN);
+  return (!c ||
+    el._pendingValue === NOT_PENDING ||
+    c._config & CONFIG_CHILDREN_FORBIDDEN) as boolean;
 }
 
 /** A28 — set when a node is staged (queuePendingNode) OUTSIDE a flush;
@@ -2049,6 +2083,28 @@ export function setWriteHook(hook: ((node?: object) => void) | null): void {
   writeHook = hook;
 }
 
+/**
+ * `el`'s comparator verdict (`_equals`), the one guarded call for recompute,
+ * setSignal (user setters and async landings) and the seam's
+ * staged-equals-committed check.
+ * - A comparator that read an unresolved async source has not shown the
+ *   values equal (#4111): falsy, a change, whose readers suspend in their own
+ *   tracked context.
+ * - Any other throw is an error of `el`'s computation (A3, #2837): routed
+ *   through the status path so error boundaries contain it, instead of
+ *   unwinding a flush or a setter; answered "same" so nothing commits.
+ * @internal
+ */
+export function isSame(el: Signal<any>, a: unknown, b: unknown): unknown {
+  if (el._equals === isEqual) return a === b;
+  try {
+    return el._equals && el._equals(a, b);
+  } catch (e) {
+    if (!(e instanceof NotReadyError))
+      return (notifyStatus(el as Computed<any>, STATUS_ERROR, e), true);
+  }
+}
+
 export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T)): T {
   if (writeHook !== null) writeHook(el);
   if (
@@ -2090,8 +2146,7 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
   const valueChanged =
     !!((el as Computed<T>)._statusFlags & STATUS_UNINITIALIZED) ||
     !!el._x?._shownError ||
-    !el._equals ||
-    !el._equals(currentValue, v);
+    !isSame(el, currentValue, v);
   if (!valueChanged) return v;
 
   // Attribution hook: this committed write is where a re-run chain begins.

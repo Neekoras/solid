@@ -30,7 +30,6 @@ import { cleanup } from "./owner.js";
 import {
   clock,
   flush,
-  flushTransaction,
   globalQueue,
   joinFuture,
   MAINLINE_QUESTION,
@@ -42,7 +41,7 @@ import {
   freshHook,
   laneStageHook
 } from "./scheduler.js";
-import type { Computed, Link } from "./types.js";
+import type { Computed, Link, Owner } from "./types.js";
 
 // The lazily-created Set is the ONE container for pending sources. Its
 // predecessor — a singular slot promoted to a Set on the second source —
@@ -131,7 +130,7 @@ export function forEachDependent(
 // forever with zero subscribers (#2934). The node's own promise/iterator
 // callbacks handle their own release (settleAutodispose in handleAsync); this
 // covers derivatively-pending dependents, which have no callbacks of their own.
-function releaseIfSettledUnobserved(node: Computed<any>): void {
+export function releaseIfSettledUnobserved(node: Computed<any>): void {
   (node as any)._fn &&
     node._config & CONFIG_AUTO_DISPOSE &&
     !node._subs &&
@@ -182,13 +181,15 @@ export function releaseSettledDependents(el: Computed<any>): void {
  * as before. Returns whether the error was staged. */
 export function stageError(el: Computed<any>, error: any, inPass?: boolean): boolean {
   // Held, or — for a pass's own throw — derived from a staging of a flush
-  // that has joined a hold (REACTIVE_STAGED_READ is this pass's; a landing
-  // after the pass cannot read it, the flush it read a staging of has
-  // committed or parked since). A plain flush publishes now (S-38).
+  // (REACTIVE_STAGED_READ is this pass's; a landing after the pass cannot
+  // read it, the flush it read a staging of has committed or parked since).
+  // Staged whether or not the flush has joined a hold yet: a pass that runs
+  // before its async sibling joins is the seam's to decide, like a value
+  // (#4109). A flush that parks nothing publishes it at its commit (S-38).
   if (
     !(
       el._config & CONFIG_HELD ||
-      (inPass && el._flags & REACTIVE_STAGED_READ && flushTransaction)
+      (inPass && el._flags & REACTIVE_STAGED_READ && globalQueue._running)
     ) ||
     passLane
   )
@@ -492,7 +493,7 @@ export function handleAsync<T>(
     // skip this stale async result — the upcoming flush will recompute the node
     // with the new value, creating a fresh Promise that supersedes this one.
     if (el._flags & REACTIVE_DIRTY) return;
-    const wasUninitialized = !!(el._statusFlags & STATUS_UNINITIALIZED);
+    const wasUninitialized = el._statusFlags & STATUS_UNINITIALIZED;
     landStatus(el);
     // Attribution hook: lets the engine snapshot state before the landing
     // branches, so it can tell whether the plain path's setSignal committed a
@@ -523,14 +524,9 @@ export function handleAsync<T>(
       // CARVE 2: the override-covered landing (hold + A18 supersession) and the
       // lane-routed landing (derived override, lane effect queue) went with
       // the optimistic engine; every landing is the plain setSignal. A node
-      // already held stages its answer into that hold (`setSignal`).
-      try {
-        setSignal(el, () => value);
-      } catch (e) {
-        // Same containment as above: setSignal's comparator throw is the only
-        // pre-commit failure here, and there is no user callsite to throw to.
-        notifyStatus(el, STATUS_ERROR, e);
-      }
+      // already held stages its answer into that hold (`setSignal`). Its
+      // comparator throw is contained there (`isSame`, A3).
+      setSignal(el, () => value);
       // Attribution hook: this path landed through setSignal, whose write
       // hook already saw any committed change — direct=false lets the engine
       // reclassify that write as an async landing iff it actually committed.
@@ -577,18 +573,14 @@ export function handleAsync<T>(
   // close registration uses the ambient owner; and DEFERRED (the flattening
   // path — a thenable resolved to an iterable in a later microtask), where
   // there is no caller to serve and no ambient owner: sync-settled steps
-  // write through asyncWrite, and close registration goes through the slot
-  // the thenable branch pre-registered while it still owned the context.
-  // Returns whether a sync answer landed (first yield or empty completion) —
-  // meaningful only in the live posture.
-  const consumeIterator = (
-    source: AsyncIterable<T>,
-    registerClose?: (fn: () => void) => void
-  ): boolean => {
+  // write through asyncWrite, and close registration targets `owner` (el
+  // itself) directly. Returns whether a sync answer landed (first yield or
+  // empty completion) — meaningful only in the live posture.
+  const consumeIterator = (source: AsyncIterable<T>, owner?: Owner): boolean => {
     const it = source[Symbol.asyncIterator]();
     let hadValue = false;
     let completed = false;
-    let initialRead = !registerClose;
+    let initialRead = !owner;
 
     const close = () => {
       if (completed) return;
@@ -598,7 +590,7 @@ export function handleAsync<T>(
         if (isThenable(returned)) returned.then(undefined, () => {});
       } catch {}
     };
-    registerClose ? registerClose(close) : cleanup(close);
+    cleanup(close, owner);
     // Flight-identity cancellation (#3122): the registration above is the
     // owner-death backstop; the teardown slot fires at the _inFlight release
     // sites so supersede stops this stream immediately.
@@ -607,8 +599,15 @@ export function handleAsync<T>(
     // Release check before each next pull: an unobserved lazy node must tear
     // down (its close above runs via disposal, closing the iterator) instead
     // of pumping the stream forever with zero subscribers (#2935).
+    // Later pulls run from an async continuation with no compute catch above
+    // them: a throw invoking the protocol (next(), the step's then) settles
+    // as this flight's error instead of escaping as a rejection (#4112).
     const iterateOrRelease = () => {
-      if (!settleAutodispose()) iterate();
+      try {
+        if (!settleAutodispose()) iterate();
+      } catch (e) {
+        handleError(e);
+      }
     };
 
     const iterate = (): boolean => {
@@ -699,7 +698,7 @@ export function handleAsync<T>(
   // stream itself rather than settling on the iterable object. One level
   // only: A+ `then` already collapses nested thenables, so the resolved
   // value is never itself a thenable.
-  const flattenIfIterable = (value: any, registerClose?: (fn: () => void) => void): boolean => {
+  const flattenIfIterable = (value: any, owner?: Owner): boolean => {
     let innerIterator: any = false;
     if (typeof value === "object" && value !== null) {
       untrack(() => {
@@ -708,8 +707,8 @@ export function handleAsync<T>(
     }
     if (!innerIterator) return false;
     syncValue = undefined as T;
-    const landed = consumeIterator(value as AsyncIterable<T>, registerClose);
-    if (!registerClose) liveLanded = landed;
+    const landed = consumeIterator(value as AsyncIterable<T>, owner);
+    if (!owner) liveLanded = landed;
     return true;
   };
 
@@ -718,34 +717,32 @@ export function handleAsync<T>(
       rejected = false,
       syncError: any,
       isSync = true;
-    // Close registration for the flattening path. Consumption starts in a
-    // microtask where the ambient owner is gone (or worse, someone else's),
-    // so `cleanup()` can't be used — the close targets el's disposal list
-    // directly, exactly where a live cleanup() during this recompute would
-    // have put it. Only a flight that actually flattens becomes
-    // disposal-bearing.
-    const registerDeferredClose = (fn: () => void) => {
-      if (!el._disposal) el._disposal = fn;
-      else if (Array.isArray(el._disposal)) el._disposal.push(fn);
-      else el._disposal = [el._disposal, fn];
-    };
     (__DEV__ ? watchAsyncTail(el, result as PromiseLike<T>) : (result as PromiseLike<T>)).then(
       v => {
         if (isSync) {
           syncValue = v;
           resolved = true;
-        } else if (
-          el._x?._inFlight === result &&
-          !(el._flags & REACTIVE_DISPOSED) &&
-          flattenIfIterable(v, registerDeferredClose)
-        ) {
-          // Flattened: the stream is the value. Each yield lands through
-          // asyncWrite under this flight's identity; the first one clears
-          // pending exactly like a plain promise resolution would have.
-          // (Disposed nodes never start a pump — their disposal list has
-          // already run, so nothing could ever close the iterator.)
         } else {
-          asyncWrite(v);
+          // Flattening consumes the stream as the value: each yield lands
+          // through asyncWrite under this flight's identity; the first one
+          // clears pending exactly like a plain promise resolution would.
+          // Disposed nodes never start a pump (their disposal list already
+          // ran, so nothing could close the iterator). Consumption starts in
+          // a microtask where the ambient owner is gone, so the close
+          // registers on el's own disposal list. Iterator setup here has no
+          // compute catch above it: a protocol throw settles as this
+          // flight's error (#4112).
+          try {
+            if (
+              el._x?._inFlight === result &&
+              !(el._flags & REACTIVE_DISPOSED) &&
+              flattenIfIterable(v, el)
+            )
+              return;
+            asyncWrite(v);
+          } catch (e) {
+            handleError(e);
+          }
           settleAutodispose();
         }
       },
