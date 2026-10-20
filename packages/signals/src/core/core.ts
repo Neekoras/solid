@@ -1896,10 +1896,15 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
     }
   }
 
+  // A pass created after an unflushed replacement reads the committed
+  // error, not the last good value underneath it. A frame reader of a held
+  // replacement sees that same error until the hold commits.
+  if (
+    el._x?._shownError &&
+    (!c || committed || (unflushedStaged && unflushedValue(el) !== NOT_PENDING))
+  )
+    throw el._x._shownError;
   if (committed) return el._value as T;
-  // D-41: an untracked read reads the screen, and a shown error is on it
-  // until the answer that replaces it commits.
-  if (!c && el._x?._shownError) throw el._x._shownError;
   const value = serve(el, c as Computed<any> | null) as T;
   if (
     !c &&
@@ -2154,10 +2159,12 @@ export function setMemo<T>(el: Computed<T>, v: T | ((prev: T) => T)): T {
     txOf(el) !== flushTransaction;
   // The writer read the committed frame; its updater composes on it.
   if (held && typeof v === "function") v = (v as (prev: T) => T)(el._value);
+  // Keep the old error on screen until this write commits. It also makes an
+  // equal-to-last-good-value write pass the equality gate in setSignal.
+  if (el._statusFlags & STATUS_ERROR) el._x!._shownError = el._x!._error;
   const result = setSignal(el, v);
-  // #4110: the write replaces a failed derivation's outcome. It lands without
-  // re-running `_fn`, and nothing else clears STATUS_ERROR, so without this
-  // every later read keeps throwing the error the derivation left behind.
+  // A written value supersedes a held pass's staged error too.
+  el._config &= ~CONFIG_STAGED_ERROR;
   if (el._statusFlags & STATUS_ERROR) notifyStatus(el, STATUS_NONE, undefined);
   if (held) {
     // The one write that re-runs: the staging it replaced was derived from

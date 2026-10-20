@@ -29,7 +29,7 @@ import {
   STATUS_UNINITIALIZED
 } from "./constants.js";
 import { attrHooks } from "./attribution-hooks.js";
-import { notifyStatus } from "./async.js";
+import { notifyStatus, settleErroredDependents } from "./async.js";
 import { ext, markUnflushedStaged, recompute, resyncUnflushedCompanions } from "./core.js";
 import { DEV, emitDiagnostic, GRAPH_SIZE_WARN_AT, noteFanOut, reportDiagnostic } from "./dev.js";
 import { sweepDormant, trimStaleDeps } from "./graph.js";
@@ -1253,6 +1253,7 @@ export function commitPendingNode(n: Signal<any>): void {
   const inFlight = n._pendingValue === NOT_PENDING && (c._statusFlags! & STATUS_PENDING) !== 0;
   const err = n._config & CONFIG_STAGED_ERROR;
   // An answer commits: the error it replaces leaves the display (D-41).
+  const shownError = !inFlight && c._x?._shownError;
   if (!inFlight && c._x) c._x._shownError = undefined;
   n._config = inFlight
     ? (n._config & ~(CONFIG_HELD | CONFIG_HELD_FRAME)) | CONFIG_INPUTS_PUBLISHED
@@ -1276,6 +1277,7 @@ export function commitPendingNode(n: Signal<any>): void {
   } else if (n._pendingValue !== NOT_PENDING) {
     n._value = n._pendingValue as any;
     n._pendingValue = NOT_PENDING;
+    if (shownError) settleErroredDependents(c as Computed<unknown>, shownError);
     // A node born staged (recompute) initializes at this commit.
     c._statusFlags! &= ~STATUS_UNINITIALIZED;
     // A quiet re-ask's classification survives its landing and dies with
