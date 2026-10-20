@@ -2219,7 +2219,7 @@ export function setMemo<T>(el: Computed<T>, v: T | ((prev: T) => T)): T {
   if (el._statusFlags & STATUS_ERROR) el._x!._shownError = el._x!._error;
   const result = setSignal(el, v);
   // A written value supersedes a held pass's staged error too.
-  el._config &= ~CONFIG_STAGED_ERROR;
+  if (el._pendingValue !== NOT_PENDING) el._config &= ~CONFIG_STAGED_ERROR;
   if (el._statusFlags & STATUS_ERROR) notifyStatus(el, STATUS_NONE, undefined);
   if (held) {
     // The one write that re-runs: the staging it replaced was derived from

@@ -204,6 +204,11 @@ const serverConditions = ["import", "node", "default"];
 // core-retained, adding 12 B to isPending/latest and up to 16 B to hydrating
 // builds on Linux. The remaining caps are ratcheted to the larger of the
 // measured Linux CI and macOS artifacts, rounded up to the next 0.01 kB.
+// #4143: manual writes to errored writable memos retain the displayed error
+// until commit, block early readers from seeing the last good value, and
+// settle dependents after the replacement commits. This costs 113-115
+// minified bytes in client scenarios on next @ 2172a376; each affected cap
+// below is the local brotli measurement plus 10 B, rounded to 0.01 KB.
 module.exports = [
   {
     name: "signals: core floor (createSignal/Memo/Effect/Root/flush)",
@@ -1089,8 +1094,8 @@ module.exports = [
     // Unread key beside a held sibling publishes at flush (#4146), re-measured after merging next @ 8c75f82f (2026-10-19): 14.82 -> 14.85 KB, measured locally (linux) at 14,837 B brotli / 44,972 B minified (+48 B minified over next).
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 14.85 -> 14.90 KB, recorded minified 44,972 -> 45,089 B, measured locally (linux) at 14,882 B brotli / 45,089 B minified (+117 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): 14.90 KB -> 14.94 KB, recorded minified 45,089 -> 45,115 B (+26 B), measured in CI at 14,927 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "14.94 KB",
-    capMinified: 45115,
+    limit: "14.99 KB",
+    capMinified: 45230,
     alias
   },
   {
@@ -1396,8 +1401,8 @@ module.exports = [
     // Re-recorded on next @ fb6006eb (2026-10-19, accepted by the maintainer): recorded minified 28,197 -> 28,247 B, measured locally (linux) at 10,023 B brotli. #4156 grew this scenario without re-recording it, so next sat past the 20 B minified allowance and brotli noise failed unrelated PRs. Cap unchanged.
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 10.03 -> 10.12 KB, recorded minified 28,247 -> 28,356 B, measured locally (linux) at 10,103 B brotli / 28,356 B minified (+109 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): 10.12 KB -> 10.14 KB, recorded minified 28,356 -> 28,383 B (+27 B), measured in CI at 10,121 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "10.14 KB",
-    capMinified: 28383,
+    limit: "10.17 KB",
+    capMinified: 28498,
     alias
   },
   {
@@ -1430,7 +1435,7 @@ module.exports = [
     // Stale staged error cleared on re-run (#4109, 2026-10-19, over next @ fda29a4c): 7.86 KB -> 7.88 KB, measured in CI at 7,863 B brotli / 21,639 B minified (+38 B minified over next): a re-run pass drops an earlier pass's staged error before it computes, so a recompute that no longer throws does not publish the old one. Correctness; Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB; recorded minified = measured.
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 7.88 -> 7.95 KB, recorded minified 21,639 -> 21,745 B, measured locally (linux) at 7,937 B brotli / 21,745 B minified (+106 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): 7.95 KB -> 7.96 KB, recorded minified 21,745 -> 21,773 B (+28 B), measured in CI at 7,941 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "7.96 KB",
+    limit: "8.00 KB",
     capMinified: 21773
   },
   {
@@ -2621,8 +2626,8 @@ module.exports = [
     // Unread key beside a held sibling publishes at flush (#4146), re-measured after merging next @ 8c75f82f (2026-10-19): 30.23 KB (unchanged), measured locally (linux) at 30,220 B brotli / 94,882 B minified (+48 B minified over next).
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 30.23 -> 30.30 KB, recorded minified 94,882 -> 94,999 B, measured locally (linux) at 30,289 B brotli / 94,999 B minified (+117 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): cap 30.30 KB unchanged, recorded minified 94,999 -> 95,025 B (+26 B), measured in CI at 30,267 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "30.30 KB",
-    capMinified: 95025,
+    limit: "30.35 KB",
+    capMinified: 95140,
     alias
   },
   {
@@ -2909,8 +2914,8 @@ module.exports = [
     // Stale staged error cleared on re-run (#4109, 2026-10-19, over next @ fda29a4c): 13.14 KB -> 13.19 KB, measured in CI at 13,173 B brotli / 36,948 B minified (+35 B minified over next): a re-run pass drops an earlier pass's staged error before it computes, so a recompute that no longer throws does not publish the old one. Correctness; Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB; recorded minified = measured.
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 13.19 -> 13.24 KB, recorded minified 36,948 -> 37,060 B, measured locally (linux) at 13,226 B brotli / 37,060 B minified (+112 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): cap 13.24 KB unchanged, recorded minified 37,060 -> 37,087 B (+27 B), measured in CI at 13,217 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "13.24 KB",
-    capMinified: 37087,
+    limit: "13.29 KB",
+    capMinified: 37202,
     alias
   },
   {
@@ -3250,8 +3255,8 @@ module.exports = [
     // Stale staged error cleared on re-run (#4109, 2026-10-19, over next @ fda29a4c): 14.91 KB -> 14.95 KB, measured in CI at 14,939 B brotli / 41,908 B minified (+36 B minified over next): a re-run pass drops an earlier pass's staged error before it computes, so a recompute that no longer throws does not publish the old one. Correctness; Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB; recorded minified = measured.
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 14.95 -> 14.99 KB, recorded minified 41,908 -> 42,019 B, measured locally (linux) at 14,971 B brotli / 42,019 B minified (+111 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): 14.99 KB -> 15.00 KB, recorded minified 42,019 -> 42,046 B (+27 B), measured in CI at 14,988 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "15.00 KB",
-    capMinified: 42046,
+    limit: "15.04 KB",
+    capMinified: 42161,
     alias: observeAlias
   },
   {
@@ -3742,8 +3747,8 @@ module.exports = [
     // mapArray window-staged commit (perf, #4114, 2026-10-16, merged over next @ dbc5d0005 after #4104's ratchet and #4108's observe raises): 29.19 -> 29.48 KB, measured at 29,462 B brotli / 88,235 B minified (+272 B brotli over the cap, +653 B minified over the recorded size): updateKeyedMap stages only the changed window, commits its bookkeeping arrays in place and takes a Map-free pure-removal path. Local measurement; CI's bytes re-base this cap.
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 29.48 -> 29.59 KB, recorded minified 88,235 -> 88,339 B, measured locally (linux) at 29,572 B brotli / 88,339 B minified (+104 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): cap 29.59 KB unchanged, recorded minified 88,339 -> 88,365 B (+26 B), measured in CI at 29,535 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "29.59 KB",
-    capMinified: 88365,
+    limit: "29.62 KB",
+    capMinified: 88480,
     alias: observeAlias
   },
   // Compiled-template scenarios (2026-10-05): the four `app:` fixtures above
@@ -3830,8 +3835,8 @@ module.exports = [
     // Stale staged error cleared on re-run (#4109, 2026-10-19, over next @ fda29a4c): 9.77 KB -> 9.79 KB, measured in CI at 9,775 B brotli / 27,247 B minified (+38 B minified over next): a re-run pass drops an earlier pass's staged error before it computes, so a recompute that no longer throws does not publish the old one. Correctness; Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB; recorded minified = measured.
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 9.79 -> 9.86 KB, recorded minified 27,247 -> 27,356 B, measured locally (linux) at 9,849 B brotli / 27,356 B minified (+109 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): cap 9.86 KB unchanged, recorded minified 27,356 -> 27,383 B (+27 B), measured in CI at 9,846 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "9.86 KB",
-    capMinified: 27383,
+    limit: "9.92 KB",
+    capMinified: 27496,
     alias
   },
   {
@@ -3950,8 +3955,8 @@ module.exports = [
     // Unread key beside a held sibling publishes at flush (#4146), re-measured after merging next @ 8c75f82f (2026-10-19): 26.03 KB (unchanged), recorded minified 80,929 -> 80,977 B, measured locally (linux) at 26,025 B brotli / 80,977 B minified (+48 B minified over next).
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 26.03 -> 26.10 KB, recorded minified 80,977 -> 81,083 B, measured locally (linux) at 26,089 B brotli / 81,083 B minified (+106 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): cap 26.10 KB unchanged, recorded minified 81,083 -> 81,112 B (+29 B), measured in CI at 26,086 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "26.10 KB",
-    capMinified: 81112,
+    limit: "26.12 KB",
+    capMinified: 81227,
     alias
   },
   {
@@ -5518,8 +5523,8 @@ module.exports = [
     // Stale staged error cleared on re-run (#4109, 2026-10-19, over next @ fda29a4c): 35.14 KB -> 35.16 KB, measured in CI at 35,148 B brotli / 107,588 B minified (+38 B minified over next): a re-run pass drops an earlier pass's staged error before it computes, so a recompute that no longer throws does not publish the old one. Correctness; Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB; recorded minified = measured.
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 35.16 -> 35.19 KB, recorded minified 107,588 -> 107,701 B, measured locally (linux) at 35,175 B brotli / 107,701 B minified (+113 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): 35.19 KB -> 35.23 KB, recorded minified 107,701 -> 107,725 B (+24 B), measured in CI at 35,212 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "35.23 KB",
-    capMinified: 107725,
+    limit: "35.33 KB",
+    capMinified: 107840,
     alias: pageAlias
   },
   {
@@ -5645,8 +5650,8 @@ module.exports = [
     // Stale staged error cleared on re-run (#4109, 2026-10-19, over next @ fda29a4c): 41.17 KB -> 41.23 KB, measured in CI at 41,215 B brotli / 122,766 B minified (+29 B minified over next): a re-run pass drops an earlier pass's staged error before it computes, so a recompute that no longer throws does not publish the old one. Correctness; Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB; recorded minified = measured.
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 41.23 -> 41.31 KB, recorded minified 122,766 -> 122,880 B, measured locally (linux) at 41,294 B brotli / 122,880 B minified (+114 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): cap 41.31 KB unchanged, recorded minified 122,880 -> 122,907 B (+27 B), measured in CI at 41,283 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "41.31 KB",
-    capMinified: 122907,
+    limit: "41.34 KB",
+    capMinified: 123022,
     alias: pageAlias
   },
   {
@@ -5842,8 +5847,8 @@ module.exports = [
     // Re-recorded on next @ fb6006eb (2026-10-19, accepted by the maintainer): recorded minified 125,035 -> 125,074 B, measured locally (linux) at 40,538 B brotli. #4156 grew this scenario without re-recording it, so next sat past the 20 B minified allowance and brotli noise failed unrelated PRs. Cap unchanged.
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 40.58 -> 40.71 KB, recorded minified 125,074 -> 125,181 B, measured locally (linux) at 40,699 B brotli / 125,181 B minified (+107 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): cap 40.71 KB unchanged, recorded minified 125,181 -> 125,207 B (+26 B), measured in CI at 40,645 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "40.71 KB",
-    capMinified: 125207,
+    limit: "40.73 KB",
+    capMinified: 125322,
     alias: pageAlias,
     conditions: solidConditions,
     compile: { hydratable: true }
@@ -6015,8 +6020,8 @@ module.exports = [
     // Stale staged error cleared on re-run (#4109, 2026-10-19, over next @ fda29a4c): 46.76 KB -> 46.79 KB, measured in CI at 46,776 B brotli / 140,055 B minified (+29 B minified over next): a re-run pass drops an earlier pass's staged error before it computes, so a recompute that no longer throws does not publish the old one. Correctness; Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB; recorded minified = measured.
     // Lazy memo read through a rebuilt child memo (#4142, 2026-10-19, over next @ a9b9f9e4, accepted by the maintainer): 46.79 -> 46.86 KB, recorded minified 140,055 -> 140,165 B, measured locally (linux) at 46,845 B brotli / 140,165 B minified (+110 B minified over the recorded size): a disposal during a pending pass defers releasing lazy memos until the pass ends, so a memo the rebuilt child reads again is not released and re-run. Correctness; CI re-bases.
     // Every comparator call guarded, default comparators on a fast path (#4111, 2026-10-20, over next @ 6371b910): 46.86 KB -> 46.90 KB, recorded minified 140,165 -> 140,198 B (+33 B), measured in CI at 46,884 B brotli. `isSame` is the one guarded comparator call (a NotReady read is a change, any other throw goes to the node's boundary, A3), with `isEqual` on a fast path so the propagation benches keep next's speed. Size-Exception accepted by the maintainer (2026-10-19). Cap at measured + 10 B rounded up to 0.01 KB, never lowered here; recorded minified = measured.
-    limit: "46.90 KB",
-    capMinified: 140198,
+    limit: "46.93 KB",
+    capMinified: 140307,
     alias: pageAlias,
     conditions: solidConditions,
     compile: { hydratable: true }
